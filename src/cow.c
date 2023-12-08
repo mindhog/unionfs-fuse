@@ -31,24 +31,24 @@
  * l_nbranch (lower nbranch than nbranch) is write protected, create the dir path on
  * nbranch for an other COW operation.
  */
-int path_create_cow(const char *path, int nbranch_ro, int nbranch_rw) {
+int path_create_cow(const char *path, branch_entry_t *branch_ro, branch_entry_t *branch_rw) {
 	DBG("%s\n", path);
 
 	if (!uopt.cow_enabled) RETURN(0);
 
-	return path_create(path, nbranch_ro, nbranch_rw);
+	return path_create(path, branch_ro, branch_rw);
 }
 
 /**
  * Same as  path_create_cow(), but ignore the last segment in path,
  * i.e. it might be a filename.
  */
-int path_create_cutlast_cow(const char *path, int nbranch_ro, int nbranch_rw) {
+int path_create_cutlast_cow(const char *path, branch_entry_t *branch_ro, branch_entry_t *branch_rw) {
 	DBG("%s\n", path);
 
 	char *dname = u_dirname(path);
 	if (dname == NULL) RETURN(-ENOMEM);
-	int ret = path_create_cow(dname, nbranch_ro, nbranch_rw);
+	int ret = path_create_cow(dname, branch_ro, branch_rw);
 	free(dname);
 
 	RETURN(ret);
@@ -57,7 +57,7 @@ int path_create_cutlast_cow(const char *path, int nbranch_ro, int nbranch_rw) {
 /**
  * initiate the cow-copy action
  */
-int cow_cp(const char *path, int branch_ro, int branch_rw, bool copy_dir) {
+int cow_cp(const char *path, branch_entry_t *branch_ro, branch_entry_t *branch_rw, bool copy_dir) {
 	DBG("%s\n", path);
 
 	// create the path to the file
@@ -65,10 +65,10 @@ int cow_cp(const char *path, int branch_ro, int branch_rw, bool copy_dir) {
 	if (res != 0) RETURN(res);
 
 	char from[PATHLEN_MAX], to[PATHLEN_MAX];
-	if (BUILD_PATH(from, uopt.branches[branch_ro].path, path)) {
+	if (BUILD_PATH(from, branch_ro->path, path)) {
 		RETURN(-ENAMETOOLONG);
 	}
-	if (BUILD_PATH(to, uopt.branches[branch_rw].path, path)) {
+	if (BUILD_PATH(to, branch_rw->path, path)) {
 		RETURN(-ENAMETOOLONG);
 	}
 
@@ -120,7 +120,7 @@ int cow_cp(const char *path, int branch_ro, int branch_rw, bool copy_dir) {
 /**
  * copy a directory between branches (includes all contents of the directory)
  */
-int copy_directory(const char *path, int branch_ro, int branch_rw) {
+int copy_directory(const char *path, branch_entry_t *branch_ro, branch_entry_t *branch_rw) {
 	DBG("%s\n", path);
 
 	/* create the directory on the destination branch */
@@ -131,7 +131,7 @@ int copy_directory(const char *path, int branch_ro, int branch_rw) {
 
 	/* determine path to source directory on read-only branch */
 	char from[PATHLEN_MAX];
-	if (BUILD_PATH(from, uopt.branches[branch_ro].path, path)) RETURN(1);
+	if (BUILD_PATH(from, branch_ro->path, path)) RETURN(1);
 
 	DIR *dp = opendir(from);
 	if (dp == NULL) RETURN(1);

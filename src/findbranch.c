@@ -51,13 +51,12 @@
 #include "debug.h"
 #include "usyslog.h"
 
-static bool branch_contains_path(int branch, const char *path, bool *is_dir) {
-	if (branch < 0 || branch >= uopt.nbranches) {
-		RETURN(false);
-	}
-
+/**
+ *  binf.lock MUST be locked for read when this is called.
+ */
+static bool branch_contains_path(branch_entry_t *branch, const char *path, bool *is_dir) {
 	char p[PATHLEN_MAX];
-	if (BUILD_PATH(p, uopt.branches[branch].path, path)) {
+	if (BUILD_PATH(p, branch->path, path)) {
 		errno = ENAMETOOLONG;
 		RETURN(false);
 	}
@@ -74,7 +73,7 @@ static bool branch_contains_path(int branch, const char *path, bool *is_dir) {
 	}
 }
 
-bool branch_contains_file_or_parent_dir(int branch, const char *path) {
+bool branch_contains_file_or_parent_dir(branch_entry_t *branch, const char *path) {
 	bool is_dir = false;
 	bool found = branch_contains_path(branch, path, &is_dir);
 
@@ -96,14 +95,16 @@ bool branch_contains_file_or_parent_dir(int branch, const char *path) {
 
 /**
  *  Find a branch that has "path". Return the branch number.
+ *
+ *  binf.lock MUST be locked for read when this is called.
  */
 static int find_branch(const char *path, searchflag_t flag) {
 	DBG("%s\n", path);
 
 	int i = 0;
-	for (i = 0; i < uopt.nbranches; i++) {
+	for (i = 0; i < binf.nbranches; i++) {
 		char p[PATHLEN_MAX];
-		if (BUILD_PATH(p, uopt.branches[i].path, path)) {
+		if (BUILD_PATH(p, binf.branches[i].path, path)) {
 			errno = ENAMETOOLONG;
 			RETURN(-1);
 		}
@@ -120,7 +121,9 @@ static int find_branch(const char *path, searchflag_t flag) {
 				RETURN(i);
 			case RWONLY:
 				// we need a rw-branch
-				if (uopt.branches[i].rw) RETURN(i);
+				if (binf.branches[i].rw) {
+				    RETURN(i);
+                }
 				break;
 			default:
 				USYSLOG(LOG_ERR, "%s: Unknown flag %d\n", __func__, flag);
@@ -128,7 +131,7 @@ static int find_branch(const char *path, searchflag_t flag) {
 		}
 
 		// check check for a hide file, checking first here is the magic to hide files *below* this level
-		res = path_hidden(path, i);
+		res = path_hidden(path, &binf.branches[i]);
 		if (res > 0) {
 			// So no path, but whiteout found. No need to search in further branches
 			errno = ENOENT;
@@ -146,11 +149,17 @@ static int find_branch(const char *path, searchflag_t flag) {
 /**
  * Find a ro or rw branch.
  */
-int find_rorw_branch(const char *path) {
+int find_rorw_branch(const char *path, branch_entry_t *be) {
 	DBG("%s\n", path);
+	BINF_RDLOCK();
 	int res = find_branch(path, RWRO);
+	if (be && res != -1) *be = binf.branches[res];
+	BINF_UNLOCK();
 	RETURN(res);
 }
+
+static int find_rw_branch_cow_common_locked(const char *path, bool copy_dir, branch_entry_t *be);
+static int find_lowest_rw_branch_locked(int branch_ro);
 
 /**
  * Find a writable branch. If file does not exist, we check for
@@ -158,11 +167,15 @@ int find_rorw_branch(const char *path) {
  * @path 	- the path to find or to copy (with last element cut off)
  * @ rw_hint	- the rw branch to copy to, set to -1 to autodetect it
  */
-int __find_rw_branch_cutlast(const char *path, int rw_hint) {
-	int branch = find_rw_branch_cow(path);
+int __find_rw_branch_cutlast(const char *path, int rw_hint, branch_entry_t *be) {
+	BINF_RDLOCK();
+	int branch = find_rw_branch_cow_common_locked(path, false, be);
 	DBG("branch = %d\n", branch);
 
-	if (branch >= 0 || (branch < 0 && errno != ENOENT)) RETURN(branch);
+	if (branch >= 0 || (branch < 0 && errno != ENOENT)) {
+		if (be) *be = binf.branches[branch];
+		RETURN(branch);
+    }
 
 	DBG("Check for parent directory\n");
 
@@ -172,17 +185,18 @@ int __find_rw_branch_cutlast(const char *path, int rw_hint) {
 	char *dname = u_dirname(path);
 	if (dname == NULL) {
 		errno = ENOMEM;
+		BINF_UNLOCK();
 		RETURN(-1);
 	}
 
-	branch = find_rorw_branch(dname);
+	branch = find_branch(dname, RWRO);
 	DBG("branch = %d\n", branch);
 
 	// No branch found, so path does nowhere exist, error
 	if (branch < 0) goto out;
 
 	// Reminder rw_hint == -1 -> autodetect, we do not care which branch it is
-	if (uopt.branches[branch].rw
+	if (binf.branches[branch].rw
 	&& (rw_hint == -1 || branch == rw_hint)) goto out;
 
 	if (!uopt.cow_enabled) {
@@ -192,30 +206,33 @@ int __find_rw_branch_cutlast(const char *path, int rw_hint) {
 		goto out;
 	}
 
-	int branch_rw;
+	int branch_rw_index;
 	// since it is a directory, any rw-branch is fine
 	if (rw_hint == -1)
-		branch_rw = find_lowest_rw_branch(uopt.nbranches);
+		branch_rw_index = find_lowest_rw_branch_locked(binf.nbranches);
 	else
-		branch_rw = rw_hint;
+		branch_rw_index = rw_hint;
+	branch_entry_t branch_rw = binf.branches[branch_rw_index];
 
-	DBG("branch_rw = %d\n", branch_rw);
+	DBG("branch_rw = %d\n", branch_rw_index);
 
 	// no writable branch found, we must return an error
-	if (branch_rw < 0) {
+	if (branch_rw_index < 0) {
 		branch = -1;
 		errno = EACCES;
 		goto out;
 	}
 
-	if (path_create_cow(dname, branch, branch_rw) == 0) {
-		branch = branch_rw; // path successfully copied
+	if (path_create_cow(dname, &binf.branches[branch], &branch_rw) == 0) {
+		branch = branch_rw_index; // path successfully copied
 	} else {
 		branch = -1; // failed to copy path, error
 	}
 
 out:
+	if (be && branch != -1) *be = binf.branches[branch];
 	free(dname);
+	BINF_UNLOCK();
 
 	RETURN(branch);
 }
@@ -223,14 +240,14 @@ out:
 /**
  * Call __find_rw_branch_cutlast()
  */
-int find_rw_branch_cutlast(const char *path) {
+int find_rw_branch_cutlast(const char *path, branch_entry_t *be) {
 	int rw_hint = -1; // autodetect rw_branch
-	int res = __find_rw_branch_cutlast(path, rw_hint);
+	int res = __find_rw_branch_cutlast(path, rw_hint, be);
 	RETURN(res);
 }
 
-int find_rw_branch_cow(const char *path) {
-	return find_rw_branch_cow_common(path, false);
+int find_rw_branch_cow(const char *path, branch_entry_t *be) {
+	return find_rw_branch_cow_common(path, false, be);
 }
 
 /**
@@ -241,16 +258,30 @@ int find_rw_branch_cow(const char *path) {
  *       It will definitely fail, when a ro-branch is on top of a rw-branch
  *       and a directory is to be copied from ro- to rw-branch.
  */
-int find_rw_branch_cow_common(const char *path, bool copy_dir) {
+int find_rw_branch_cow_common(const char *path, bool copy_dir, branch_entry_t *be) {
+	BINF_RDLOCK();
 	DBG("%s\n", path);
+	int rc = find_rw_branch_cow_common_locked(path, copy_dir, be);
+	BINF_UNLOCK();
+	RETURN(rc);
+}
 
-	int branch_rorw = find_rorw_branch(path);
+/**
+ * Unlocked internal find_rw_branch_cow_common.
+ * binf.lock MUST be locked for read when this is called.
+ */
+static int find_rw_branch_cow_common_locked(const char *path, bool copy_dir, branch_entry_t *be) {
+
+	int branch_rorw = find_branch(path, RWRO);
 
 	// not found anywhere
 	if (branch_rorw < 0) RETURN(-1);
 
 	// the found branch is writable, good!
-	if (uopt.branches[branch_rorw].rw) RETURN(branch_rorw);
+	if (binf.branches[branch_rorw].rw) {
+		if (be) *be = binf.branches[branch_rorw];
+		RETURN(branch_rorw);
+	}
 
 	// cow is disabled and branch is not writable, so deny write permission
 	if (!uopt.cow_enabled) {
@@ -258,31 +289,43 @@ int find_rw_branch_cow_common(const char *path, bool copy_dir) {
 		RETURN(-1);
 	}
 
-	int branch_rw = find_lowest_rw_branch(branch_rorw);
+	int branch_rw = find_lowest_rw_branch_locked(branch_rorw);
 	if (branch_rw < 0) {
 		// no writable branch found
 		errno = EACCES;
 		RETURN(-1);
 	}
 
-	if (cow_cp(path, branch_rorw, branch_rw, copy_dir)) RETURN(-1);
+	if (cow_cp(path, &binf.branches[branch_rorw], &binf.branches[branch_rw], copy_dir)) RETURN(-1);
 
 	// remove a file that might hide the copied file
-	remove_hidden(path, branch_rw);
+	remove_hidden_locked(path, branch_rw);
 
+	if (be) *be = binf.branches[branch_rw];
 	RETURN(branch_rw);
+}
+
+/**
+ * Private version of find_lowest_rw_branch for cases where binf is already
+ * locked.
+ * binf.lock MUST be locked for read when this is called.
+ */
+static int find_lowest_rw_branch_locked(int branch_ro) {
+	int i = 0;
+	for (i = 0; i < branch_ro; i++) {
+		if (binf.branches[i].rw) RETURN(i); // found it it.
+	}
+	return -1;
 }
 
 /**
  * Find lowest possible writable branch but only lower than branch_ro.
  */
-int find_lowest_rw_branch(int branch_ro) {
+int find_lowest_rw_branch(int branch_ro, branch_entry_t *be) {
 	DBG_IN();
-
-	int i = 0;
-	for (i = 0; i < branch_ro; i++) {
-		if (uopt.branches[i].rw) RETURN(i); // found it it.
-	}
-
-	RETURN(-1);
+	BINF_RDLOCK();
+	int rc = find_lowest_rw_branch_locked(branch_ro);
+	if (be && rc != -1) *be = binf.branches[rc];
+	BINF_UNLOCK();
+	RETURN(rc);
 }

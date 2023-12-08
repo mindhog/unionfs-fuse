@@ -55,16 +55,16 @@ static int filedir_hidden(const char *path) {
 /**
  * check if any dir or file within path is hidden
  */
-int path_hidden(const char *path, int branch) {
+int path_hidden(const char *path, branch_entry_t *branch) {
 	DBG("%s\n", path);
 
 	if (!uopt.cow_enabled) RETURN(false);
 
 	char whiteoutpath[PATHLEN_MAX];
-	if (BUILD_PATH(whiteoutpath, uopt.branches[branch].path, METADIR, path)) RETURN(false);
+	if (BUILD_PATH(whiteoutpath, branch->path, METADIR, path)) RETURN(false);
 
 	// -1 as we MUST not end on the next path element
-	char *walk = whiteoutpath + uopt.branches[branch].path_len + strlen(METADIR) - 1;
+	char *walk = whiteoutpath + branch->path_len + strlen(METADIR) - 1;
 
 	// first slashes, e.g. we have path = /dir1/dir2/, will set walk = dir1/dir2/
 	while (*walk == '/') walk++;
@@ -92,16 +92,28 @@ int path_hidden(const char *path, int branch) {
  * If maxbranch == -1, try to delete it in all branches.
  */
 int remove_hidden(const char *path, int maxbranch) {
+	BINF_RDLOCK();
+	int rc = remove_hidden_locked(path, maxbranch);
+	BINF_UNLOCK();
+	return rc;
+}
+
+/**
+ * Version of remove_hidden that doesn't lock binf.
+ * If maxbranch == -1, try to delete it in all branches.
+ * binf.lock MUST be locked for read when this is called.
+ */
+int remove_hidden_locked(const char *path, int maxbranch) {
 	DBG("%s\n", path);
 
 	if (!uopt.cow_enabled) RETURN(0);
 
-	if (maxbranch == -1) maxbranch = uopt.nbranches;
+	if (maxbranch == -1) maxbranch = binf.nbranches;
 
 	int i;
 	for (i = 0; i <= maxbranch; i++) {
 		char p[PATHLEN_MAX];
-		if (BUILD_PATH(p, uopt.branches[i].path, METADIR, path)) RETURN(-ENAMETOOLONG);
+		if (BUILD_PATH(p, binf.branches[i].path, METADIR, path)) RETURN(-ENAMETOOLONG);
 		if (strlen(p) + strlen(HIDETAG) > PATHLEN_MAX) RETURN(-ENAMETOOLONG);
 		strcat(p, HIDETAG); // TODO check length
 
@@ -135,7 +147,7 @@ filetype_t path_is_dir(const char *path) {
 /**
  * Create a file or directory that hides path below branch_rw
  */
-static int do_create_whiteout(const char *path, int branch_rw, enum whiteout mode) {
+static int do_create_whiteout(const char *path, branch_entry_t *branch, enum whiteout mode) {
 	DBG("%s\n", path);
 
 	char metapath[PATHLEN_MAX];
@@ -144,10 +156,10 @@ static int do_create_whiteout(const char *path, int branch_rw, enum whiteout mod
 
 	// p MUST be without path to branch prefix here! 2 x branch_rw is correct here!
 	// this creates e.g. branch/.unionfs/some_directory
-	path_create_cutlast_cow(metapath, branch_rw, branch_rw);
+	path_create_cutlast_cow(metapath, branch, branch);
 
 	char p[PATHLEN_MAX];
-	if (BUILD_PATH(p, uopt.branches[branch_rw].path, metapath)) RETURN(-1);
+	if (BUILD_PATH(p, branch->path, metapath)) RETURN(-1);
 	strcat(p, HIDETAG); // TODO check length
 
 	int res;
@@ -167,7 +179,7 @@ static int do_create_whiteout(const char *path, int branch_rw, enum whiteout mod
 /**
  * Create a file that hides path below branch_rw
  */
-int hide_file(const char *path, int branch_rw) {
+int hide_file(const char *path, branch_entry_t *branch_rw) {
 	DBG("%s\n", path);
 	int res = do_create_whiteout(path, branch_rw, WHITEOUT_FILE);
 	RETURN(res);
@@ -176,7 +188,7 @@ int hide_file(const char *path, int branch_rw) {
 /**
  * Create a directory that hides path below branch_rw
  */
-int hide_dir(const char *path, int branch_rw) {
+int hide_dir(const char *path, branch_entry_t *branch_rw) {
 	DBG("%s\n", path);
 	int res = do_create_whiteout(path, branch_rw, WHITEOUT_DIR);
 	RETURN(res);
@@ -186,11 +198,11 @@ int hide_dir(const char *path, int branch_rw) {
  * This is called *after* unlink() or rmdir(), create a whiteout file
  * if the same file/dir does exist in a lower branch
  */
-int maybe_whiteout(const char *path, int branch_rw, enum whiteout mode) {
+int maybe_whiteout(const char *path, branch_entry_t *branch_rw, enum whiteout mode) {
 	DBG("%s\n", path);
 
 	// we are not interested in the branch itself, only if it exists at all
-	if (find_rorw_branch(path) != -1) {
+	if (find_rorw_branch(path, NULL) != -1) {
 		int res = do_create_whiteout(path, branch_rw, mode);
 		RETURN(res);
 	}
@@ -218,24 +230,24 @@ int set_owner(const char *path) {
 /**
  * Actually create the directory here.
  */
-static int do_create(const char *path, int nbranch_ro, int nbranch_rw) {
+static int do_create(const char *path, branch_entry_t *branch_ro, branch_entry_t *branch_rw) {
 	DBG("%s\n", path);
 
 	char dirp[PATHLEN_MAX]; // dir path to create
-	sprintf(dirp, "%s%s", uopt.branches[nbranch_rw].path, path);
+	sprintf(dirp, "%s%s", branch_rw->path, path);
 
 	struct stat buf;
 	int res = stat(dirp, &buf);
 	if (res != -1) RETURN(0); // already exists
 
-	if (nbranch_ro == nbranch_rw) {
-		// special case nbranch_ro = nbranch_rw, this is if we a create
+	if (branch_ro == branch_rw) {
+		// special case branch_ro = branch_rw, this is if we a create
 		// unionfs meta directories, so not directly on cow operations
 		buf.st_mode = S_IRWXU | S_IRWXG;
 	} else {
 		// data from the ro-branch
 		char o_dirp[PATHLEN_MAX]; // the pathname we want to copy
-		sprintf(o_dirp, "%s%s", uopt.branches[nbranch_ro].path, path);
+		sprintf(o_dirp, "%s%s", branch_ro->path, path);
 		res = stat(o_dirp, &buf);
 		if (res == -1) RETURN(1); // lower level branch removed in the mean time?
 	}
@@ -258,7 +270,7 @@ static int do_create(const char *path, int nbranch_ro, int nbranch_rw) {
 		}
 	}
 
-	if (nbranch_ro == nbranch_rw) RETURN(0); // the special case again
+	if (branch_ro == branch_rw) RETURN(0); // the special case again
 
 	if (_call_setfile) {
 		if (setfile(dirp, &buf)) RETURN(1); // directory already removed by another process?
@@ -272,11 +284,11 @@ static int do_create(const char *path, int nbranch_ro, int nbranch_rw) {
 /**
  * create the dir path on nbranch_rw matching same path on nbranch_ro
  */
-int path_create(const char *path, int nbranch_ro, int nbranch_rw) {
+int path_create(const char *path, branch_entry_t *branch_ro, branch_entry_t *branch_rw) {
 	DBG("%s\n", path);
 
 	char p[PATHLEN_MAX];
-	if (BUILD_PATH(p, uopt.branches[nbranch_rw].path, path)) RETURN(-ENAMETOOLONG);
+	if (BUILD_PATH(p, branch_rw->path, path)) RETURN(-ENAMETOOLONG);
 
 	struct stat st;
 	if (!stat(p, &st)) {
@@ -295,7 +307,7 @@ int path_create(const char *path, int nbranch_ro, int nbranch_rw) {
 
 		// +1 due to \0, which gets added automatically
 		snprintf(p, (walk - path) + 1, "%s", path); // walk - path = strlen(/dir1)
-		int res = do_create(p, nbranch_ro, nbranch_rw);
+		int res = do_create(p, branch_ro, branch_rw);
 		if (res) RETURN(res); // creating the directory failed
 
 		// as above the do loop, walk over the next slashes, walk = dir2/
@@ -309,13 +321,13 @@ int path_create(const char *path, int nbranch_ro, int nbranch_rw) {
  * Same as  path_create(), but ignore the last segment in path,
  * i.e. it might be a filename.
  */
-int path_create_cutlast(const char *path, int nbranch_ro, int nbranch_rw) {
+int path_create_cutlast(const char *path, branch_entry_t *branch_ro, branch_entry_t *branch_rw) {
 	DBG("%s\n", path);
 
 	char *dname = u_dirname(path);
 	if (dname == NULL)
 		RETURN(-ENOMEM);
-	int ret = path_create(dname, nbranch_ro, nbranch_rw);
+	int ret = path_create(dname, branch_ro, branch_rw);
 	free(dname);
 
 	RETURN(ret);

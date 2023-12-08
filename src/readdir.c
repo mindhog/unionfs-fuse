@@ -40,13 +40,13 @@ static bool hide_meta_files(int branch, const char *path, struct dirent *de)
 
 	if (uopt.hide_meta_files == false) RETURN(false);
 
-	fprintf(stderr, "uopt.branches[branch].path = %s path = %s\n", uopt.branches[branch].path, path);
+	fprintf(stderr, "binf.branches[branch].path = %s path = %s\n", binf.branches[branch].path, path);
 	fprintf(stderr, "METANAME = %s, de->d_name = %s\n", METANAME, de->d_name);
 
 	// TODO Would it be faster to add hash comparison?
 
 	// HIDE out .unionfs directory
-	if (strcmp(uopt.branches[branch].path, path) == 0
+	if (strcmp(binf.branches[branch].path, path) == 0
 	&& strcmp(METANAME, de->d_name) == 0) {
 		RETURN(true);
 	}
@@ -89,12 +89,13 @@ static bool is_hiding(struct hashtable *hides, char *fname) {
 
 /**
  * Read whiteout files
+ * binf.lock MUST be locked when this is called.
  */
 static void read_whiteouts(const char *path, struct hashtable *whiteouts, int branch) {
 	DBG("%s\n", path);
 
 	char p[PATHLEN_MAX];
-	if (BUILD_PATH(p, uopt.branches[branch].path, METADIR, path)) return;
+	if (BUILD_PATH(p, binf.branches[branch].path, METADIR, path)) return;
 
 	DIR *dp = opendir(p);
 	if (dp == NULL) return;
@@ -120,6 +121,9 @@ int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t o
 	(void) fi;  // just to prevent the compiler complaining about unused variables
 
 	DBG("%s\n", path);
+	// TODO: construct the list of branch directories separately so we're not
+	// locking the RW lock ardound the readdirs.
+	BINF_RDLOCK();
 
 	int i = 0;
 	int rc = 0;
@@ -133,17 +137,17 @@ int unionfs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t o
 
 	bool subdir_hidden = false;
 
-	for (i = 0; i < uopt.nbranches; i++) {
+	for (i = 0; i < binf.nbranches; i++) {
 		if (subdir_hidden) break;
 
 		char p[PATHLEN_MAX];
-		if (BUILD_PATH(p, uopt.branches[i].path, path)) {
+		if (BUILD_PATH(p, binf.branches[i].path, path)) {
 			rc = -ENAMETOOLONG;
 			goto out;
 		}
 
 		// check if branches below this branch are hidden
-		int res = path_hidden(path, i);
+		int res = path_hidden(path, &binf.branches[i]);
 		if (res < 0) {
 			rc = res; // error
 			goto out;
@@ -195,6 +199,7 @@ out:
 
 	if (uopt.cow_enabled) hashtable_destroy(whiteouts, 0);
 
+	BINF_UNLOCK();
 	RETURN(rc);
 }
 
@@ -217,19 +222,20 @@ int dir_not_empty(const char *path) {
 
 	if (uopt.cow_enabled) whiteouts = create_hashtable(16, string_hash, string_equal);
 
+	BINF_RDLOCK();
 	bool subdir_hidden = false;
 
-	for (i = 0; i < uopt.nbranches; i++) {
+	for (i = 0; i < binf.nbranches; i++) {
 		if (subdir_hidden) break;
 
 		char p[PATHLEN_MAX];
-		if (BUILD_PATH(p, uopt.branches[i].path, path)) {
+		if (BUILD_PATH(p, binf.branches[i].path, path)) {
 			rc = -ENAMETOOLONG;
 			goto out;
 		}
 
 		// check if branches below this branch are hidden
-		int res = path_hidden(path, i);
+		int res = path_hidden(path, &binf.branches[i]);
 		if (res < 0) {
 			rc = res; // error
 			goto out;
@@ -271,6 +277,7 @@ int dir_not_empty(const char *path) {
 out:
 	if (uopt.cow_enabled) hashtable_destroy(whiteouts, 0);
 
+	BINF_UNLOCK();
 	if (rc) RETURN(rc);
 
 	RETURN(not_empty);

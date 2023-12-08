@@ -38,11 +38,11 @@
   * If the branch that has the directory to be removed is in read-write mode,
   * we can really delete the file.
   */
-static int rmdir_rw(const char *path, int branch_rw) {
+static int rmdir_rw(const char *path, branch_entry_t *branch_rw) {
 	DBG("%s\n", path);
 
 	char p[PATHLEN_MAX];
-	if (BUILD_PATH(p, uopt.branches[branch_rw].path, path)) return ENAMETOOLONG;
+	if (BUILD_PATH(p, branch_rw->path, path)) return ENAMETOOLONG;
 
 	int res = rmdir(p);
 	if (res == -1) return errno;
@@ -60,12 +60,13 @@ static int rmdir_ro(const char *path, int branch_ro) {
 	DBG("%s\n", path);
 
 	// find a writable branch above branch_ro
-	int branch_rw = find_lowest_rw_branch(branch_ro);
+	branch_entry_t branch_rw;
+	int branch_rw_index = find_lowest_rw_branch(branch_ro, &branch_rw);
 
-	if (branch_rw < 0) return -EACCES;
+	if (branch_rw_index < 0) return -EACCES;
 
 	DBG("Calling hide_dir\n");
-	if (hide_dir(path, branch_rw) == -1) {
+	if (hide_dir(path, &branch_rw) == -1) {
 		switch (errno) {
 		case (EEXIST):
 		case (ENOTDIR):
@@ -89,11 +90,12 @@ int unionfs_rmdir(const char *path) {
 
 	if (dir_not_empty(path)) return -ENOTEMPTY;
 
-	int i = find_rorw_branch(path);
+	branch_entry_t branch;
+	int i = find_rorw_branch(path, &branch);
 	if (i == -1) return -errno;
 
 	int res;
-	if (!uopt.branches[i].rw) {
+	if (!branch.rw) {
 		// read-only branch
 		if (!uopt.cow_enabled) {
 			res = EROFS;
@@ -102,10 +104,10 @@ int unionfs_rmdir(const char *path) {
 		}
 	} else {
 		// read-write branch
-		res = rmdir_rw(path, i);
+		res = rmdir_rw(path, &branch);
 		if (res == 0) {
 			// No need to be root, whiteouts are created as root!
-			maybe_whiteout(path, i, WHITEOUT_DIR);
+			maybe_whiteout(path, &branch, WHITEOUT_DIR);
 		}
 	}
 

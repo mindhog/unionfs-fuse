@@ -95,6 +95,7 @@ int set_max_open_files(const char *arg) {
 
 
 uopt_t uopt;
+binf_t binf;
 
 void uopt_init() {
 	memset(&uopt, 0, sizeof(uopt_t)); // initialize options with zeros first
@@ -165,10 +166,12 @@ char *add_trailing_slash(char *path) {
 /**
  * Add a given branch and its options to the array of available branches.
  * example branch string "branch1=RO" or "/path/path2=RW"
+ *
+ * binf.lock MUST be held in write mode.
  */
 void add_branch(char *branch) {
-	uopt.branches = realloc(uopt.branches, (uopt.nbranches+1) * sizeof(branch_entry_t));
-	if (uopt.branches == NULL) {
+	binf.branches = realloc(binf.branches, (binf.nbranches+1) * sizeof(branch_entry_t));
+	if (binf.branches == NULL) {
 		fprintf(stderr, "%s: realloc failed\n", __func__);
 		exit(1); // still at early stage, we can't abort
 	}
@@ -181,13 +184,13 @@ void add_branch(char *branch) {
 
 	// for string manipulations it is important to copy the string, otherwise
 	// make_absolute() and add_trailing_slash() will corrupt our input (parse string)
-	uopt.branches[uopt.nbranches].path = strdup(res);
-	uopt.branches[uopt.nbranches].rw = 0;
+	binf.branches[binf.nbranches].path = strdup(res);
+	binf.branches[binf.nbranches].rw = 0;
 
 	res = strsep(ptr, "=");
 	if (res) {
 		if (strcasecmp(res, "rw") == 0) {
-			uopt.branches[uopt.nbranches].rw = 1;
+			binf.branches[binf.nbranches].rw = 1;
 		} else if (strcasecmp(res, "ro") == 0) {
 			// no action needed here
 		} else {
@@ -196,7 +199,7 @@ void add_branch(char *branch) {
 		}
 	}
 
-	uopt.nbranches++;
+	binf.nbranches++;
 }
 
 /**
@@ -204,8 +207,10 @@ void add_branch(char *branch) {
  * example arg string: "branch1=RW:branch2=RO:branch3=RO"
  */
 int parse_branches(const char *arg) {
+	BINF_WRLOCK();
+
 	// the last argument is  our mountpoint, don't take it as branch!
-	if (uopt.nbranches) return 0;
+	if (binf.nbranches) return 0;
 
 	// We don't free the buf as parts of it may go to branches
 	char *buf = strdup(arg);
@@ -220,7 +225,9 @@ int parse_branches(const char *arg) {
 	free(branch);
 	free(buf);
 
-	return uopt.nbranches;
+	int result = binf.nbranches;
+	BINF_UNLOCK();
+	return result;
 }
 
 /**
@@ -312,15 +319,16 @@ void unionfs_post_opts(void) {
 	}
 
 	// Make the pathes absolute and add trailing slashes
+	BINF_WRLOCK();
 	int i;
-	for (i = 0; i < uopt.nbranches; i++) {
+	for (i = 0; i < binf.nbranches; i++) {
 		// if -ochroot= is specified, the path has to be given absolute
 		// or relative to the chroot, so no need to make it absolute
 		// also won't work, since we are not yet in the chroot here
 		if (!uopt.chroot) {
-			uopt.branches[i].path = make_absolute(uopt.branches[i].path);
+			binf.branches[i].path = make_absolute(binf.branches[i].path);
 		}
-		uopt.branches[i].path = add_trailing_slash(uopt.branches[i].path);
+		binf.branches[i].path = add_trailing_slash(binf.branches[i].path);
 
 		// Prevent accidental umounts. Especially system shutdown scripts tend
 		// to umount everything they can. If we don't have an open file descriptor,
@@ -328,9 +336,9 @@ void unionfs_post_opts(void) {
 		char path[PATHLEN_MAX];
 
 		if (!uopt.chroot) {
-			BUILD_PATH(path, uopt.branches[i].path);
+			BUILD_PATH(path, binf.branches[i].path);
 		} else {
-			BUILD_PATH(path, uopt.chroot, uopt.branches[i].path);
+			BUILD_PATH(path, uopt.chroot, binf.branches[i].path);
 		}
 
 		int fd = open(path, O_RDONLY);
@@ -339,9 +347,10 @@ void unionfs_post_opts(void) {
 				path, strerror(errno));
 			exit(1);
 		}
-		uopt.branches[i].fd = fd;
-		uopt.branches[i].path_len = strlen(path);
+		binf.branches[i].fd = fd;
+		binf.branches[i].path_len = strlen(path);
 	}
+	BINF_UNLOCK();
 }
 
 int unionfs_opt_proc(void *data, const char *arg, int key, struct fuse_args *outargs) {

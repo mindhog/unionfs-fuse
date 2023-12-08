@@ -10,6 +10,7 @@
 
 #include <fuse.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #include "unionfs.h"
 
@@ -17,9 +18,6 @@
 #define ROOT_SEP ":"
 
 typedef struct {
-	int nbranches;
-	branch_entry_t *branches;
-
 	bool cow_enabled;
 	bool preserve_branch;
 	bool statfs_omit_ro;
@@ -52,8 +50,18 @@ enum {
 	KEY_VERSION,
 };
 
+typedef struct {
+	pthread_rwlock_t lock;
+	int nbranches;
+	branch_entry_t *branches;
+} binf_t;
 
 extern uopt_t uopt;
+extern binf_t binf;
+
+#define BINF_RDLOCK() pthread_rwlock_rdlock(&binf.lock)
+#define BINF_WRLOCK() pthread_rwlock_wrlock(&binf.lock)
+#define BINF_UNLOCK() pthread_rwlock_unlock(&binf.lock)
 
 void set_debug_path(char *new_path, int len);
 bool set_debug_onoff(int value);

@@ -20,15 +20,16 @@ typedef enum filetype {
 	IS_FILE=1,
 } filetype_t;
 
-int path_hidden(const char *path, int branch);
+int path_hidden(const char *path, branch_entry_t *branch);
 int remove_hidden(const char *path, int maxbranch);
-int hide_file(const char *path, int branch_rw);
-int hide_dir(const char *path, int branch_rw);
+int remove_hidden_locked(const char *path, int maxbranch);
+int hide_file(const char *path, branch_entry_t *branch_rw);
+int hide_dir(const char *path, branch_entry_t *branch_rw);
 filetype_t path_is_dir (const char *path);
-int maybe_whiteout(const char *path, int branch_rw, enum whiteout mode);
+int maybe_whiteout(const char *path, branch_entry_t *branch_rw, enum whiteout mode);
 int set_owner(const char *path);
-int path_create(const char *path, int nbranch_ro, int nbranch_rw);
-int path_create_cutlast(const char *path, int nbranch_ro, int nbranch_rw);
+int path_create(const char *path, branch_entry_t *branch_ro, branch_entry_t *branch_rw);
+int path_create_cutlast(const char *path, branch_entry_t *branch_ro, branch_entry_t *branch_rw);
 
 
 #endif

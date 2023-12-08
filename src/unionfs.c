@@ -53,10 +53,13 @@ int main(int argc, char *argv[]) {
 	if (uopt.debug)	debug_init();
 
 	if (!uopt.doexit) {
-		if (uopt.nbranches == 0) {
+		BINF_RDLOCK();
+		if (binf.nbranches == 0) {
 			printf("You need to specify at least one branch!\n");
+			BINF_UNLOCK();
 			RETURN(1);
 		}
+		BINF_UNLOCK();
 	}
 
 	// enable fuse permission checks, we need to set this, even we we are

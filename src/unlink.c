@@ -33,18 +33,19 @@
 /**
   * If the branch that has the file to be unlinked is in read-only mode,
   * we create a file with a HIDE tag in an upper level branch.
-  * To other fuse functions this tag means, not to expose the 
+  * To other fuse functions this tag means, not to expose the
   * lower level file.
   */
 static int unlink_ro(const char *path, int branch_ro) {
 	DBG("%s\n", path);
 
 	// find a writable branch above branch_ro
-	int branch_rw = find_lowest_rw_branch(branch_ro);
+	branch_entry_t branch_rw;
+	int branch_rw_index = find_lowest_rw_branch(branch_ro, &branch_rw);
 
-	if (branch_rw < 0) RETURN(EACCES);
+	if (branch_rw_index < 0) RETURN(EACCES);
 
-	if (hide_file(path, branch_rw) == -1) {
+	if (hide_file(path, &branch_rw) == -1) {
 		// creating the file with the hide tag failed
 		// TODO: open() error messages are not optimal on unlink()
 		RETURN(errno);
@@ -57,11 +58,11 @@ static int unlink_ro(const char *path, int branch_ro) {
   * If the branch that has the file to be unlinked is in read-write mode,
   * we can really delete the file.
   */
-static int unlink_rw(const char *path, int branch_rw) {
+static int unlink_rw(const char *path, branch_entry_t *branch_rw) {
 	DBG("%s\n", path);
 
 	char p[PATHLEN_MAX];
-	if (BUILD_PATH(p, uopt.branches[branch_rw].path, path)) RETURN(ENAMETOOLONG);
+	if (BUILD_PATH(p, branch_rw->path, path)) RETURN(ENAMETOOLONG);
 
 	int res = unlink(p);
 	if (res == -1) RETURN(errno);
@@ -75,11 +76,12 @@ static int unlink_rw(const char *path, int branch_rw) {
 int unionfs_unlink(const char *path) {
 	DBG("%s\n", path);
 
-	int i = find_rorw_branch(path);
+	branch_entry_t branch;
+	int i = find_rorw_branch(path, &branch);
 	if (i == -1) RETURN(errno);
 
 	int res;
-	if (!uopt.branches[i].rw) {
+	if (!branch.rw) {
 		// read-only branch
 		if (!uopt.cow_enabled) {
 			res = EROFS;
@@ -88,10 +90,10 @@ int unionfs_unlink(const char *path) {
 		}
 	} else {
 		// read-write branch
-		res = unlink_rw(path, i);
+		res = unlink_rw(path, &branch);
 		if (res == 0) {
 			// No need to be root, whiteouts are created as root!
-			maybe_whiteout(path, i, WHITEOUT_FILE);
+			maybe_whiteout(path, &branch, WHITEOUT_FILE);
 		}
 	}
 
