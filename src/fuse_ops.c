@@ -334,6 +334,10 @@ static int unionfs_ioctl(const char *path, unsigned int cmd, void *arg, struct f
 		debug_init();
 		return 0;
 	}
+	case UNIONFS_SET_BRANCHES: {
+		reparse_branches((char *) data);
+		RETURN(0);
+	}
 	default:
 		USYSLOG(LOG_ERR, "Unknown ioctl: %d", cmd);
 		return -EINVAL;

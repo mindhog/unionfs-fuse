@@ -18,6 +18,7 @@
 #include <pthread.h>
 
 #include "conf.h"
+#include "debug.h"
 #include "opts.h"
 #include "version.h"
 #include "string.h"
@@ -101,7 +102,12 @@ void uopt_init() {
 	memset(&uopt, 0, sizeof(uopt_t)); // initialize options with zeros first
 
 	pthread_rwlock_init(&uopt.dbgpath_lock, NULL);
+	pthread_rwlock_init(&binf.lock, NULL);
 }
+
+// When we go into fuse mode, getcwd() gives us an empty string, so we store
+// the CWD here at program initialization. .
+static char cwd[PATHLEN_MAX] = "";
 
 /**
  * Take a relative path as argument and return the absolute path by using the
@@ -111,8 +117,10 @@ char *make_absolute(char *relpath) {
 	// Already an absolute path
 	if (*relpath == '/') return relpath;
 
-	char cwd[PATHLEN_MAX];
-	if (!getcwd(cwd, PATHLEN_MAX)) {
+	// Initialize cwd first time through (we don't need to worry about
+	// thread-safety, is this will get called when we're still in single-thread
+	// mode during initialization and not changed after that).
+	if (!cwd[0] && !getcwd(cwd, PATHLEN_MAX)) {
 		perror("Unable to get current working directory");
 		return NULL;
 	}
@@ -125,7 +133,8 @@ char *make_absolute(char *relpath) {
 
 	// 2 due to: +1 for '/' between cwd and relpath
 	//           +1 for trailing '/'
-	int abslen = cwdlen + strlen(relpath) + 2;
+	//           +1 for '\0'
+	int abslen = cwdlen + strlen(relpath) + 3;
 	if (abslen > PATHLEN_MAX) {
 		fprintf(stderr, "Absolute path too long!\n");
 		return NULL;
@@ -169,7 +178,7 @@ char *add_trailing_slash(char *path) {
  *
  * binf.lock MUST be held in write mode.
  */
-void add_branch(char *branch) {
+static void add_branch(char *branch) {
 	binf.branches = realloc(binf.branches, (binf.nbranches+1) * sizeof(branch_entry_t));
 	if (binf.branches == NULL) {
 		fprintf(stderr, "%s: realloc failed\n", __func__);
@@ -184,6 +193,8 @@ void add_branch(char *branch) {
 
 	// for string manipulations it is important to copy the string, otherwise
 	// make_absolute() and add_trailing_slash() will corrupt our input (parse string)
+	// Note that the path strings get leaked on a reparse (see
+	// reparse_branches()).
 	binf.branches[binf.nbranches].path = strdup(res);
 	binf.branches[binf.nbranches].rw = 0;
 
@@ -202,16 +213,7 @@ void add_branch(char *branch) {
 	binf.nbranches++;
 }
 
-/**
- * These options define our branch paths.
- * example arg string: "branch1=RW:branch2=RO:branch3=RO"
- */
-int parse_branches(const char *arg) {
-	BINF_WRLOCK();
-
-	// the last argument is  our mountpoint, don't take it as branch!
-	if (binf.nbranches) return 0;
-
+static int parse_branches_internal(const char *arg) {
 	// We don't free the buf as parts of it may go to branches
 	char *buf = strdup(arg);
 	char **ptr = (char **)&buf;
@@ -222,12 +224,52 @@ int parse_branches(const char *arg) {
 		add_branch(branch);
 	}
 
-	free(branch);
 	free(buf);
 
-	int result = binf.nbranches;
+	return binf.nbranches;
+}
+
+/**
+ * These options define our branch paths.
+ * example arg string: "branch1=RW:branch2=RO:branch3=RO"
+ */
+int parse_branches(const char *arg) {
+	BINF_WRLOCK();
+
+	// the last argument is  our mountpoint, don't take it as branch!
+	if (binf.nbranches) return 0;
+
+	int result = parse_branches_internal(arg);
 	BINF_UNLOCK();
 	return result;
+}
+
+static void fix_branches();
+
+/**
+ * Clear and reparse the branch array.
+ */
+void reparse_branches(const char *arg) {
+	BINF_WRLOCK();
+
+	// Close all of the file handles to existing branches.
+	for (int i = 0; i < binf.nbranches; i++)
+		close(binf.branches[i].fd);
+
+	binf.nbranches = 0;
+
+	// Note that we don't free the paths: these get leaked under the assumption
+	// that changing the branch list is a fairly infrequent operation, whereas
+	// trying to manage them safely is difficult.
+	free(binf.branches);
+	binf.branches = 0;
+
+	parse_branches_internal(arg);
+	fix_branches();
+	DBG("nbranches = %d\n", binf.nbranches);
+	for (int i = 0; i < binf.nbranches; ++i)
+		DBG("branch %d: %s\n", i, binf.branches[i].path);
+	BINF_UNLOCK();
 }
 
 /**
@@ -305,28 +347,19 @@ static void print_help(const char *progname) {
 }
 
 /**
-  * This method is to post-process options once we know all of them
+  * Post-processes the branch array.
+  * binf.lock MUST be held in write mode.
   */
-void unionfs_post_opts(void) {
-	// chdir to the given chroot, we
-	if (uopt.chroot) {
-		int res = chdir(uopt.chroot);
-		if (res) {
-			fprintf(stderr, "Chdir to %s failed: %s ! Aborting!\n",
-				  uopt.chroot, strerror(errno));
-			exit(1);
-		}
-	}
-
-	// Make the pathes absolute and add trailing slashes
-	BINF_WRLOCK();
+static void fix_branches() {
 	int i;
 	for (i = 0; i < binf.nbranches; i++) {
 		// if -ochroot= is specified, the path has to be given absolute
 		// or relative to the chroot, so no need to make it absolute
 		// also won't work, since we are not yet in the chroot here
 		if (!uopt.chroot) {
-			binf.branches[i].path = make_absolute(binf.branches[i].path);
+			char *tmp = binf.branches[i].path;
+			binf.branches[i].path = make_absolute(tmp);
+			free(tmp);
 		}
 		binf.branches[i].path = add_trailing_slash(binf.branches[i].path);
 
@@ -350,6 +383,25 @@ void unionfs_post_opts(void) {
 		binf.branches[i].fd = fd;
 		binf.branches[i].path_len = strlen(path);
 	}
+}
+
+/**
+  * This method is to post-process options once we know all of them
+  */
+void unionfs_post_opts(void) {
+	// chdir to the given chroot, we
+	if (uopt.chroot) {
+		int res = chdir(uopt.chroot);
+		if (res) {
+			fprintf(stderr, "Chdir to %s failed: %s ! Aborting!\n",
+				  uopt.chroot, strerror(errno));
+			exit(1);
+		}
+	}
+
+	// Make the pathes absolute and add trailing slashes
+	BINF_WRLOCK();
+	fix_branches();
 	BINF_UNLOCK();
 }
 

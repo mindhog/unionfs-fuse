@@ -496,6 +496,11 @@ class IOCTL_TestCase(Common, unittest.TestCase):
 		self.assertEqual(ex.returncode, 1)
 		self.assertEqual(ex.output, b'')
 
+	def test_change_branches(self):
+		call('%s -b rw1=rw:ro2=ro union' % (self.unionfsctl_path,))
+		self.assertEqual(read_from_file('union/ro2_file'), 'ro2')
+		self.assertFalse(os.path.exists('union/ro1_file'))
+
 
 class UnionFS_RW_RO_COW_RelaxedPermissions_TestCase(Common, unittest.TestCase):
 	def setUp(self):

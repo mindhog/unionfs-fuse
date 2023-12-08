@@ -17,6 +17,10 @@ static void print_help(char* progname) {
 	fprintf(stderr, "       -p </path/to/debug/file>\n");
 	fprintf(stderr, "       -d <on/off>\n");
 	fprintf(stderr, "          Enable or disable debugging.\n");
+	fprintf(stderr, "       -b <branches>\n");
+	fprintf(stderr, "          Change the branch list.  THis has the same format as the first arg\n");
+	fprintf(stderr, "          of the unionfs command, consisting of a colon-separated list of\n");
+	fprintf(stderr, "          directories.  It may be no more than %d characters in size.\n", MAX_BRANCH_STR);
 	fprintf(stderr, "\n");
 	fprintf(stderr, "Example: ");
 	fprintf(stderr, " %s -p /tmp/unionfs-fuse.log -d on /mnt/unionfs/union\n", progname);
@@ -46,7 +50,7 @@ int main(int argc, char **argv) {
 	const char* argument_param;
 	int debug_on_off;
 	int ioctl_res;
-	while ((opt = getopt(argc, argv, "d:p:")) != -1) {
+	while ((opt = getopt(argc, argv, "d:p:b:")) != -1) {
 		switch (opt) {
 		case 'p':
 			argument_param = optarg;
@@ -95,6 +99,31 @@ int main(int argc, char **argv) {
 					strerror(errno) );
 				exit(1);
 			}
+			break;
+		case 'b':
+			argument_param = optarg;
+			if (strlen(argument_param) < 1) {
+				fprintf(stderr, "Invalid branch path.");
+				print_help(progname);
+				exit(1);
+			}
+
+			if (strlen(argument_param) > MAX_BRANCH_STR) {
+				fprintf(stderr, "Branch string to big! (%d chars, max)\n", MAX_BRANCH_STR);
+				print_help(progname);
+				exit(1);
+			}
+
+			// ioctl() expects a buffer of whatever size is encoded in the
+			// command, so allocate one.
+			argument_param = strcpy(malloc(MAX_BRANCH_STR), argument_param);
+			ioctl_res = ioctl(fd, UNIONFS_SET_BRANCHES, argument_param);
+			if (ioctl_res == -1) {
+				fprintf(stderr, "set branches ioctl failed: %s\n",
+					strerror(errno) );
+				exit(1);
+			}
+			free((char *) argument_param);
 			break;
 		default:
 			fprintf(stderr, "Unhandled option %c given.\n", opt);
