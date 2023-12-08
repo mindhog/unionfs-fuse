@@ -359,7 +359,8 @@ static void fix_branches() {
 		if (!uopt.chroot) {
 			char *tmp = binf.branches[i].path;
 			binf.branches[i].path = make_absolute(tmp);
-			free(tmp);
+			if (tmp != binf.branches[i].path)
+				free(tmp);
 		}
 		binf.branches[i].path = add_trailing_slash(binf.branches[i].path);
 
