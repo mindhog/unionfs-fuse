@@ -174,6 +174,7 @@ int __find_rw_branch_cutlast(const char *path, int rw_hint, branch_entry_t *be) 
 
 	if (branch >= 0 || (branch < 0 && errno != ENOENT)) {
 		if (be) *be = binf.branches[branch];
+		BINF_UNLOCK();
 		RETURN(branch);
     }
 

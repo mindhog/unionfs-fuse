@@ -237,7 +237,10 @@ int parse_branches(const char *arg) {
 	BINF_WRLOCK();
 
 	// the last argument is  our mountpoint, don't take it as branch!
-	if (binf.nbranches) return 0;
+	if (binf.nbranches) {
+		BINF_UNLOCK();
+		return 0;
+	}
 
 	int result = parse_branches_internal(arg);
 	BINF_UNLOCK();
